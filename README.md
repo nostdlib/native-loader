@@ -1,7 +1,6 @@
 # native-loader
 
-Position-independent Windows loader **stub**, injected into a host PE by the
-[C2 dashboard's Native Binder](https://github.com/nostdlib/C2).
+Position-independent Windows loader **stub**, injected into a host PE.
 
 The stub is a small freestanding C program compiled to flat position-independent
 shellcode. Injected into a host EXE/DLL (new `.c2` section + entry-point hook), it:
@@ -39,10 +38,5 @@ The rolling **`preview`** release publishes:
 ## Binder-patched fields (ASCII-findable by the shared `LoaderUrlPatcher`)
 
 - `SHELLCODE_URL_PLACEHOLDER` — 256-byte slot; the agent URL is written here (UTF-8, zero-padded).
-- `C2OEPRAV` — 8-byte marker; the host's original entry-point RVA (uint32 LE) is written in the 4 bytes immediately after it.
 
 The stub reads the URL from the first slot and the OEP RVA from the second to resume the host (ASLR-safe — it derives the module base from PEB at runtime).
-
-## Related
-- [nostdlib/android-loader](https://github.com/nostdlib/android-loader) — Android counterpart (same patch contract).
-- [nostdlib/C2](https://github.com/nostdlib/C2) — the dashboard that consumes this.
