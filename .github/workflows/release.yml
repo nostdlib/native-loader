@@ -1,0 +1,74 @@
+name: Release
+
+# Builds loader.exe + loader.dll (x64 + x86) and publishes them to a GitHub
+# Release. The C2 dashboard downloads these at build time into
+# wwwroot/loaders/windows-native/ and patches the shellcode URL into the
+# SHELLCODE_URL_PLACEHOLDER buffer at bind time.
+#
+#   - push to main / manual  -> (re)creates the rolling `preview` release
+#   - push of a v* tag        -> creates a versioned release
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # gh release create / delete
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, Win32]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & build (CMake, ${{ matrix.arch }})
+        run: |
+          cmake -A ${{ matrix.arch }} -B build-${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-${{ matrix.arch }} --config Release
+
+      - name: Stage assets
+        shell: bash
+        run: |
+          arch=${{ matrix.arch }}
+          tag=$([ "$arch" = "x64" ] && echo "x64" || echo "x86")
+          mkdir -p dist
+          cp "build-$arch/Release/loader.exe" "dist/loader-$tag.exe"
+          cp "build-$arch/Release/loader.dll" "dist/loader-$tag.dll"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loader-${{ matrix.arch }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out && mv dist/* out/ 2>/dev/null || true
+          ls -la out
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            gh release create "$TAG" out/* \
+              --title "$TAG" --notes "Native Windows loader $TAG" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release delete preview --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+            gh release create preview out/* \
+              --title "Preview" --prerelease --target "$GITHUB_SHA" \
+              --notes "Rolling build of the native Windows loader ($GITHUB_SHA)." \
+              --repo "$GITHUB_REPOSITORY"
+          fi
