@@ -19,9 +19,10 @@
  * stub-x64.bin / stub-x86.bin. See stub.ld + release.yml.
  */
 
+#include <intrin.h>   /* provides __readgsqword / __readfsdword as inline intrinsics (no CRT) */
+
 #ifdef __x86_64__
 typedef unsigned long long uptr;
-unsigned long long __readgsqword(unsigned long);
 #define PEB()        ((uptr)__readgsqword(0x60))
 #define LDR_OFF      0x18
 #define INMEM_OFF    0x20
@@ -31,7 +32,6 @@ unsigned long long __readgsqword(unsigned long);
 #define EXPDIR_OFF   0x88   /* export data dir RVA field, from e_lfanew       */
 #else
 typedef unsigned int uptr;
-unsigned int __readfsdword(unsigned int);
 #define PEB()        ((uptr)__readfsdword(0x30))
 #define LDR_OFF      0x0C
 #define INMEM_OFF    0x14
