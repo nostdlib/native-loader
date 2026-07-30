@@ -39,8 +39,9 @@ jobs:
           x86_64-w64-mingw32-ld -T stub/stub.ld --entry=_start -o stub.pe stub.o
           x86_64-w64-mingw32-objcopy -O binary stub.pe dist/stub-x64.bin
           ls -la dist
-          echo "marker count (expect 1):"; grep -a -c SHELLCODE_URL_PLACEHOLDER dist/stub-x64.bin || true
-          echo "OEP marker count (expect 1):"; grep -a -c C2OEPRAV dist/stub-x64.bin || true
+          # The binder patcher locates these markers in the flat binary — there must be exactly one of each.
+          test "$(grep -a -c SHELLCODE_URL_PLACEHOLDER dist/stub-x64.bin)" = "1" || { echo "FAIL: URL marker missing/duplicated"; exit 1; }
+          test "$(grep -a -c C2OEPRAV dist/stub-x64.bin)" = "1" || { echo "FAIL: OEP marker missing/duplicated"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

