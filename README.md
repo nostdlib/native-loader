@@ -15,7 +15,7 @@ shellcode. Injected into a host EXE/DLL (new `.c2` section + entry-point hook), 
 
 ```sh
 x86_64-w64-mingw32-gcc -c -O2 -ffreestanding -nostdlib -fno-stack-protector \
-  -fno-builtin -fPIC stub/stub.c -o stub.o
+  -e _start stub/stub.c -o stub.o
 x86_64-w64-mingw32-ld -T stub/stub.ld --entry=_start -o stub.pe stub.o
 x86_64-w64-mingw32-objcopy -O binary stub.pe stub-x64.bin
 ```

