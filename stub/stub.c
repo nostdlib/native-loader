@@ -12,7 +12,7 @@
  *
  * Two fields are patched by the binder at bind time (both ASCII-findable so the
  * shared LoaderUrlPatcher works):
- *   - SHELLCODE_URL_PLACEHOLDER : 256-byte slot holding the agent URL.
+ *   - SHELLCODE_URL_PLACEHOLDE : 256-byte slot holding the agent URL.
  *   - C2OEPRAV + 4 bytes        : the host's original entry-point RVA (uint32 LE).
  *
  * Build (CI): mingw gcc -ffreestanding -fPIC ... then ld --oformat binary →
