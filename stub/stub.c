@@ -208,3 +208,4 @@ __attribute__((section(".text.start"), used)) void _start(void)
     for (;;)
     {
     } /* never reached for an EXE entry */
+}
