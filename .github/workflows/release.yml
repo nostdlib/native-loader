@@ -27,8 +27,8 @@ jobs:
       - name: Compile stub (freestanding, position-independent)
         run: |
           x86_64-w64-mingw32-gcc -c -O2 -ffreestanding -nostdlib -fno-stack-protector \
-            -fno-builtin -fno-asynchronous-unwind-tables -fPIC \
-            stub/stub.c -o stub.o
+                -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                -e _start stub/stub.c -o stub.o
 
       - name: Relocations (should be PC-relative only — verifies PIC)
         run: x86_64-w64-mingw32-objdump -r stub.o || true
