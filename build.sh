@@ -18,6 +18,7 @@ for MODE in exe dll; do
 
     x86_64-w64-mingw32-ld -T stub/stub.ld --entry=_start -o "stub-$MODE.pe" "stub-$MODE.o"
     x86_64-w64-mingw32-objcopy -O binary "stub-$MODE.pe" "dist/stub-x64-$MODE.bin"
+    rm stub-*.o stub-*.pe
 done
 
 # The binder's patcher needs exactly one of each ASCII marker per flat binary.
