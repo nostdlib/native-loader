@@ -34,9 +34,11 @@ typedef unsigned long long uptr;
 #define LDR_OFF 0x18
 #define INMEM_OFF 0x20
 #define INLOAD_OFF 0x10
-#define DBASE_INMEM 0x20  /* DllBase offset from an InMemoryOrderLinks node */
-#define DBASE_INLOAD 0x30 /* DllBase offset from an InLoadOrderLinks node   */
-#define EXPDIR_OFF 0x88   /* ex#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
+#define DBASE_INMEM 0x20    /* DllBase offset from an InMemoryOrderLinks node */
+#define BASENAME_INMEM 0x48 /* BaseDllName (UNICODE_STRING) offset from an InMemoryOrderLinks node */
+#define BUFPTR_OFF 0x08     /* Buffer field offset within a UNICODE_STRING (ptr-aligned) */
+#define DBASE_INLOAD 0x30   /* DllBase offset from an InLoadOrderLinks node   */
+#define EXPDIR_OFF 0x88     /* ex#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
 #else
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readfsdword(0x30))
@@ -44,6 +46,8 @@ typedef unsigned long long uptr;
 #define INMEM_OFF 0x14
 #define INLOAD_OFF 0x0C
 #define DBASE_INMEM 0x10
+#define BASENAME_INMEM 0x24 /* BaseDllName (UNICODE_STRING) offset from an InMemoryOrderLinks node */
+#define BUFPTR_OFF 0x04     /* Buffer field offset within a UNICODE_STRING */
 #define DBASE_INLOAD 0x18
 #define EXPDIR_OFF 0x78
 #endif
@@ -114,15 +118,67 @@ static int streq(const char *a, const char *b)
     return *a == *b;
 }
 
-/* kernel32 base = 3rd entry of PEB.Ldr.InMemoryOrderModuleList (common Win10/11 order). */
-static uptr kernel32_base(void)
+/* Normalize one UTF-16 code unit into a lowercase ASCII byte ('A'–'Z' → 'a'–'z';
+ * every other code unit narrows to char unchanged). This is the single place
+ * that knows how to make a wide char comparable to an ASCII literal. */
+static char to_lower_ascii(u16 c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c + 'a' - 'A');
+    return (char)c;
+}
+
+/* Compare a UTF-16LE module basename against an ASCII literal for equality,
+ * delegating all normalization to to_lower_ascii. The literal may be passed
+ * with or without the file extension: "kernel32" matches L"kernel32.dll" but
+ * not L"kernelbase.dll". Returns 1 on match. */
+static int name_ieq(const u16 *wide, u32 wchars, const char *ascii)
+{
+    u32 i;
+    for (i = 0; i < wchars; i++)
+    {
+        char a = to_lower_ascii(wide[i]);
+        char b = ascii[i];
+
+        if (b == 0)
+            /* literal ended: basename must end here or at its extension dot */
+            return a == '.' || a == 0;
+        if (a != to_lower_ascii((u16)(unsigned char)b))
+            return 0;
+    }
+    /* basename ended: a match only if the literal ended too (full match) */
+    return ascii[i] == 0;
+}
+
+/* GetModuleHandle-style lookup: walk PEB.Ldr.InMemoryOrderModuleList and return
+ * the base of the loaded module whose basename matches `name` (case-insensitive,
+ * extension optional). Returns 0 if not found. Matching by name (not fixed list
+ * position) survives module load-order differences across Windows builds. */
+static uptr get_module_base(const char *name)
 {
     uptr peb = PEB();
     uptr ldr = *(uptr *)(peb + LDR_OFF);
-    uptr e = *(uptr *)(ldr + INMEM_OFF); /* 1st entry's InMemoryOrderLinks */
-    e = *(uptr *)e;                      /* 2nd */
-    e = *(uptr *)e;                      /* 3rd (kernel32) */
-    return *(uptr *)(e + DBASE_INMEM);
+    uptr head = ldr + INMEM_OFF; /* &InMemoryOrderModuleList (list sentinel) */
+    uptr cur = *(uptr *)head;    /* first entry's InMemoryOrderLinks */
+
+    while (cur != head)
+    {
+        u32 wbytes = *(u16 *)(cur + BASENAME_INMEM);
+        u16 *wname = (u16 *)*(uptr *)(cur + BASENAME_INMEM + BUFPTR_OFF);
+        uptr base = *(uptr *)(cur + DBASE_INMEM);
+
+        if (base && wname && name_ieq(wname, wbytes / 2, name))
+            return base;
+
+        cur = *(uptr *)cur; /* advance via Flink */
+    }
+    return 0;
+}
+
+/* kernel32.dll — the bootstrap module the stub resolves its first exports from. */
+static uptr kernel32_base(void)
+{
+    return get_module_base("kernel32");
 }
 
 static void *resolve_export(uptr base, const char *name)
