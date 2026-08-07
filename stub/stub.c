@@ -38,7 +38,7 @@ typedef unsigned long long uptr;
 #define BASENAME_INMEM 0x48 /* BaseDllName (UNICODE_STRING) offset from an InMemoryOrderLinks node */
 #define BUFPTR_OFF 0x08     /* Buffer field offset within a UNICODE_STRING (ptr-aligned) */
 #define DBASE_INLOAD 0x30   /* DllBase offset from an InLoadOrderLinks node   */
-#define EXPDIR_OFF 0x88     /* ex#define EXPDIR_OFF 0x88   /* export data dir RVA field, from e_lfanew       */
+#define EXPDIR_OFF 0x88     /* export data dir RVA field, from e_lfanew       */
 #else
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readfsdword(0x30))
